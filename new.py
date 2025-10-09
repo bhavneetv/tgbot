@@ -37,20 +37,20 @@ from telegram.ext import (
     filters,
 )
 
-# from flask import Flask
-# from threading import Thread
+from flask import Flask
+from threading import Thread
 
-# app = Flask('')
+app = Flask('')
 
-# @app.route('/')
-# def home():
-#     return "Bot is running!"
+@app.route('/')
+def home():
+    return "Bot is running!"
 
-# def run():
-#     app.run(host='0.0.0.0', port=8080)
+def run():
+    app.run(host='0.0.0.0', port=8080)
 
-# t = Thread(target=run)
-# t.start()
+t = Thread(target=run)
+t.start()
 
 # ---------- CONFIG (ENV-friendly) ----------
 UPLOAD_BOT_TOKEN = os.environ.get("UPLOAD_BOT_TOKEN", "7986735755:AAHQ5Ke7TI9uBxcYivDpib5pNzOmebGdZSY")
