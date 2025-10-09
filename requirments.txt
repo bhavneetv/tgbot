@@ -1,8 +1,4 @@
-aiogram==2.25.1
-requests
-
-TOKEN = "7986735755:AAHQ5Ke7TI9uBxcYivDpib5pNzOmebGdZSY"
-MAIN_CHANNEL_ID = "-1003104322226"  # Replace with your channel ID
-ADMIN_PASSWORD = "test"
-video_bot = "Viewvideos10bot"  # Your Video Viewer Bot username
-AUTH_TIMEOUT = 24 * 60 * 60  # 24 hours
+python-telegram-bot==20.8
+Flask==2.3.6
+aiohttp==3.8.5
+Pillow==10.0.1
