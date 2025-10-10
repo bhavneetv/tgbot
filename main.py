@@ -43,18 +43,18 @@ from threading import Thread
 
 
 
-app = Flask(__name__)
+#app = Flask(__name__)
 
-@app.route('/')
+#@app.route('/')
 def home():
-    return "Bot is running!"
+    #return "Bot is running!"
 
 def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+ #   port = int(os.environ.get("PORT", 8080))
+   # app.run(host='0.0.0.0', port=port)
 
 # Start Flask server in background thread
-Thread(target=run_flask).start()
+#Thread(target=run_flask).start()
 
 # ---------- CONFIG (ENV-friendly) ----------
 UPLOAD_BOT_TOKEN = os.environ.get("UPLOAD_BOT_TOKEN", "7986735755:AAHQ5Ke7TI9uBxcYivDpib5pNzOmebGdZSY")
@@ -940,10 +940,46 @@ def main():
     logger.info("Upload+View Bot starting...")
     app.run_polling()
 
+import os
+import asyncio
+from flask import Flask, request
+from telegram import Update
+#from tel
+
+# --- Create Flask app ---
+app = Flask(__name__)
+
+# --- Telegram Bot setup ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+# --- Webhook route ---
+@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
+async def webhook():
+    data = await request.get_json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return "ok", 200
+
+@app.route("/")
+def home():
+    return "Bot is alive on Render ✅"
+
+# --- Webhook setup ---
+async def set_webhook():
+    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook/{BOT_TOKEN}"
+    await telegram_app.bot.set_webhook(url=webhook_url)
+    print(f"✅ Webhook set to {webhook_url}")
+
+def main():
+    asyncio.run(set_webhook())
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
-    #threading.Thread(target=run).start()
     main()
+
+
 
 # import asyncio
 

@@ -2,5 +2,6 @@
 python-telegram-bot>=20.3
 aiohttp
 requests
-Flask
+Flask>=2.3
+
 Pillow
