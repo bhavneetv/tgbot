@@ -912,19 +912,27 @@ application = ApplicationBuilder().token(UPLOAD_BOT_TOKEN).build()
 
 # --- Webhook route ---
 # @flask_app.route(f"/webhook/{UPLOAD_BOT_TOKEN}", methods=["POST"])
+# Create a global event loop for Telegram updates
+background_loop = asyncio.new_event_loop()
+asyncio.set_event_loop(background_loop)
+
 @flask_app.route(f"/webhook/{UPLOAD_BOT_TOKEN}", methods=["POST"])
 def webhook():
-    """Handle incoming Telegram updates (sync-safe)"""
+    """Handle incoming Telegram updates safely across requests"""
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, application.bot)
 
-        # Run async process_update safely inside its own loop
-        asyncio.run(application.process_update(update))
+        # Run coroutine in background loop without closing it
+        asyncio.run_coroutine_threadsafe(
+            application.process_update(update),
+            background_loop
+        )
     except Exception as e:
         logging.exception(f"Error in webhook: {e}")
 
     return "OK", 200
+
 
 
 
@@ -940,6 +948,14 @@ async def setup_webhook():
     await bot.set_webhook(url=webhook_url)
     logging.info(f"✅ Webhook set: {webhook_url}")
 
+
+import threading
+
+def run_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+threading.Thread(target=run_loop, args=(background_loop,), daemon=True).start()
 
 # --- Main entrypoint ---
 def main():
