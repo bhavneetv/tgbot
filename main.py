@@ -982,6 +982,7 @@ def home():
     return "Bot is alive on Render ✅"
 
 # --- Setup function ---
+#
 async def init_bot():
     # Initialize and start the bot application manually
     await telegram_app.initialize()
