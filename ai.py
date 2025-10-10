@@ -44,6 +44,9 @@ from telegram.ext import (
 
 import aiohttp
 
+import asyncio
+asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+
 # ------------------------------
 # Config (env)
 # ------------------------------
@@ -877,32 +880,34 @@ async def set_webhook_if_needed():
 # ------------------------------
 # Main entry — init DB, load password, start flask + telegram event loop
 # ------------------------------
+import threading
 def main():
     init_db()
     load_password_from_db()
 
-    # Start the Telegram Application background (initialization)
     async def start_async():
         await application.initialize()
         await application.start()
         await set_webhook_if_needed()
-        # Do NOT call application.updater.start_polling() — we rely on webhook only
         logger.info("Telegram Application initialized and running (webhook mode).")
-        # Keep the application running until process exit (we don't call stop here).
-    # Run the telegram app initialization in background thread / task
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(start_async())
-    except Exception:
-        logger.exception("Failed to start telegram application")
-        raise
 
-    # Run flask (blocking). Render will use gunicorn/uvicorn; but for simple Render web service, Flask's built-in server is enough.
-    # If you prefer a production WSGI server, configure Render to run via gunicorn pointing to this file.
+    # ✅ Start the Telegram bot in a separate background thread
+    def run_bot():
+        asyncio.run(start_async())
+
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+
+    # ✅ Start Flask server (keeps the process alive)
     logger.info("Starting Flask webserver on port %d", PORT)
-    # Run Flask app — this call blocks the process and handles incoming webhook POSTs
     flask_app.run(host="0.0.0.0", port=PORT)
+
+
+import asyncio
+
+# def run_bot():
+#     asyncio.run(init_bot())  # keep your existing init_bot() here
 
 if __name__ == "__main__":
     main()
+
