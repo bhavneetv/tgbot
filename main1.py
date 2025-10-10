@@ -943,24 +943,30 @@ async def setup_webhook():
 
 # --- Main entrypoint ---
 def main():
-    """Main entrypoint for Render"""
+    """Main entrypoint (used by Render)"""
     logging.basicConfig(level=logging.INFO)
-    # Initialize database, etc.
     init_db()
     load_password_from_db()
-
-    # Add your handlers to the application here
-    # example:
     application.add_handler(CommandHandler("start", start))
-    # application.add_handler(conv_handler)
 
-    # Setup webhook (run async setup once before Flask starts)
-    asyncio.run(setup_webhook())
+    # Run setup tasks in the event loop
+    loop = asyncio.get_event_loop()
 
-    # Start Flask web server
+    async def init_bot():
+        # Initialize the telegram app before using process_update
+        await application.initialize()
+        await application.start()
+        await setup_webhook()
+        logging.info("✅ Bot initialized and webhook set.")
+
+    loop.run_until_complete(init_bot())
+
+    # Start Flask server
     port = int(os.environ.get("PORT", 8080))
     logging.info(f"🚀 Starting Flask server on port {port}")
     flask_app.run(host="0.0.0.0", port=port)
+
+
 
 
 if __name__ == "__main__":
