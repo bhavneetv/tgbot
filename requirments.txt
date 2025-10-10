@@ -1,5 +1,6 @@
-python-telegram-bot==13.15
-flask
+
+python-telegram-bot==20.8
 aiohttp
 requests
+Flask
 Pillow
