@@ -41,17 +41,20 @@ from telegram.ext import (
 from flask import Flask
 from threading import Thread
 
-app = Flask('')
+
+
+app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "Bot is running!"
 
-def run():
-    app.run(host='0.0.0.0', port=8080)
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
-t = Thread(target=run)
-t.start()
+# Start Flask server in background thread
+Thread(target=run_flask).start()
 
 # ---------- CONFIG (ENV-friendly) ----------
 UPLOAD_BOT_TOKEN = os.environ.get("UPLOAD_BOT_TOKEN", "7986735755:AAHQ5Ke7TI9uBxcYivDpib5pNzOmebGdZSY")
@@ -939,7 +942,7 @@ def main():
 
 
 if __name__ == "__main__":
-    threading.Thread(target=run).start()
+    #threading.Thread(target=run).start()
     main()
 
 # import asyncio
