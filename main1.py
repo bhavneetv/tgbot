@@ -912,14 +912,10 @@ application = ApplicationBuilder().token(UPLOAD_BOT_TOKEN).build()
 
 # --- Webhook route ---
 @flask_app.route(f"/webhook/{UPLOAD_BOT_TOKEN}", methods=["POST"])
-async def webhook():
-    """Handle incoming Telegram updates via webhook"""
-    try:
-        data = request.get_json(force=True)
-        update = Update.de_json(data, application.bot)
-        await application.process_update(update)
-    except Exception as e:
-        logging.exception(f"Error processing update: {e}")
+def webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, application.bot)
+    asyncio.create_task(application.process_update(update))
     return "OK", 200
 
 
