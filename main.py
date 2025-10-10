@@ -972,7 +972,7 @@ telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
 @app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     data = request.get_json()
-      print(f"📩 Received update: {data}", flush=True)
+    print(f"📩 Received update: {data}", flush=True)
     update = Update.de_json(data, telegram_app.bot)
     asyncio.run(telegram_app.process_update(update))
     return "ok", 200
