@@ -2,6 +2,7 @@
 python-telegram-bot>=20.3
 aiohttp
 requests
-Flask>=2.3
+Flask[async]==3.0.3
+
 
 Pillow
