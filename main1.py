@@ -961,26 +961,33 @@ threading.Thread(target=run_loop, args=(background_loop,), daemon=True).start()
 def main():
     """Main entrypoint (used by Render)"""
     logging.basicConfig(level=logging.INFO)
+
+    # --- Step 1: initialize DB or other setup ---
     init_db()
     load_password_from_db()
-    application.add_handler(CommandHandler("start", start))
 
-    # Run setup tasks in the event loop
-    loop = asyncio.get_event_loop()
-
+    # --- Step 2: Initialize bot & webhook using a fresh event loop ---
     async def init_bot():
-        # Initialize the telegram app before using process_update
         await application.initialize()
         await application.start()
         await setup_webhook()
         logging.info("✅ Bot initialized and webhook set.")
 
-    loop.run_until_complete(init_bot())
+    asyncio.run(init_bot())  # <-- temporary loop just for setup
 
-    # Start Flask server
+    application.add_handler(CommandHandler("start", start))
+    # --- Step 3: Start background event loop for Telegram updates ---
+    def run_loop(loop):
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
+
+    threading.Thread(target=run_loop, args=(background_loop,), daemon=True).start()
+
+    # --- Step 4: Run Flask server ---
     port = int(os.environ.get("PORT", 8080))
     logging.info(f"🚀 Starting Flask server on port {port}")
     flask_app.run(host="0.0.0.0", port=port)
+
 
 
 
