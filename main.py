@@ -899,7 +899,7 @@ async def cmd_myinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # Utility to register handlers and run
-def main():
+def nmain():
     init_db()
     load_password_from_db()
     app = ApplicationBuilder().token(UPLOAD_BOT_TOKEN).build()
@@ -955,49 +955,90 @@ def main():
 
 # asyncio.run(main())  # or whatever your bot entry function is
 
-import os
-import asyncio
-from flask import Flask, request
-from telegram import Update
-from telegram.ext import ApplicationBuilder
 
-# --- Create Flask app ---
-app = Flask(__name__)
-
-# --- Telegram Bot setup ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-# --- Webhook route (sync version for Flask) ---
-@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    data = request.get_json()
-    print(f"📩 Received update: {data}", flush=True)
-    update = Update.de_json(data, telegram_app.bot)
-    asyncio.run(telegram_app.process_update(update))
-    return "ok", 200
-
-@app.route("/")
-def home():
-    return "Bot is alive on Render ✅"
 
 # --- Setup function ---
 #
-async def init_bot():
+
     # Initialize and start the bot application manually
-    await telegram_app.initialize()
-    await telegram_app.start()
+    
 
     # Set webhook
-    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook/{BOT_TOKEN}"
-    await telegram_app.bot.set_webhook(url=webhook_url)
-    print(f"✅ Webhook set to {webhook_url}")
+
 
 # --- Main entry point ---
+
+# --- Create Flask app ---
+from flask import Flask, request
+import asyncio
+
+flask_app = Flask(__name__)
+
+# Use the same token and handlers Application
+BOT_TOKEN = UPLOAD_BOT_TOKEN  # reuse your configured token
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+# ---- Register all handlers (same as before) ----
+conv = ConversationHandler(
+    entry_points=[CommandHandler("upload", cmd_upload)],
+    states={
+        STATE_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, password_text)],
+        STATE_THUMBNAIL: [MessageHandler(filters.PHOTO & ~filters.COMMAND, thumbnail_handler), CommandHandler("cancel", cancel_command)],
+        STATE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_handler), CommandHandler("cancel", cancel_command)],
+        STATE_OPTION: [CallbackQueryHandler(option_pressed)],
+        STATE_MEDIA_UPLOAD: [
+            MessageHandler((filters.PHOTO | filters.VIDEO | filters.Document.ALL) & ~filters.COMMAND, media_receiver),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, url_text_receive),
+            CommandHandler("done", done_receiving_media),
+            CommandHandler("cancel", cancel_command),
+        ],
+        STATE_CONFIRM_TOKEN: [CallbackQueryHandler(token_choice_callback)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel_command)],
+    allow_reentry=True,
+)
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(conv)
+app.add_handler(CallbackQueryHandler(option_pressed, pattern="^opt_"))
+app.add_handler(CallbackQueryHandler(token_choice_callback, pattern="^tok_"))
+app.add_handler(CallbackQueryHandler(callback_get_token_exeio, pattern="^gettok_"))
+app.add_handler(CommandHandler("addvip", cmd_addvip))
+app.add_handler(CommandHandler("delvip", cmd_delvip))
+app.add_handler(CommandHandler("changepass", cmd_changepass))
+app.add_handler(CommandHandler("myinfo", cmd_myinfo))
+
+# --- Flask webhook route ---
+@flask_app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    data = request.get_json()
+    print(f"📩 Update received: {data}", flush=True)
+    update = Update.de_json(data, app.bot)
+    asyncio.run(app.process_update(update))
+    return "ok", 200
+
+
+@flask_app.route("/")
+def home():
+    return "✅ Bot is alive (Flask + Webhook active)"
+
+
+# --- Init bot & set webhook ---
+async def init_bot():
+    await app.initialize()
+    await app.start()
+    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook/{BOT_TOKEN}"
+    await app.bot.set_webhook(url=webhook_url)
+    print(f"✅ Webhook set to {webhook_url}")
+
+
 def main():
+    init_db()
+    load_password_from_db()
     asyncio.run(init_bot())
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    flask_app.run(host="0.0.0.0", port=port)
+
 
 if __name__ == "__main__":
     main()
