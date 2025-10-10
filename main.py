@@ -938,6 +938,7 @@ def main():
 
 
 if __name__ == "__main__":
+    threading.Thread(target=run).start()
     main()
 
 # import asyncio
