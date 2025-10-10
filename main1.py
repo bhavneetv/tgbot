@@ -906,88 +906,57 @@ import asyncio
 # Create Flask app (Render exposes this via HTTPS)
 flask_app = Flask(__name__)
 
-@flask_app.route('/')
-def home():
-    return "✅ Bot is alive (Webhook running on Render)"
-
-# Create Telegram Application
+# --- Create Telegram bot application ---
 application = ApplicationBuilder().token(UPLOAD_BOT_TOKEN).build()
 
-# --- Add your handlers exactly as before ---
-# Paste all your handlers here, same as your old main() function:
-# Example:
-# application.add_handler(CommandHandler("start", start))
-# application.add_handler(CommandHandler("myinfo", cmd_myinfo))
-# application.add_handler(MessageHandler(filters.PHOTO, handle_image))
-# application.add_handler(CallbackQueryHandler(button_callback))
-# ...etc.
-conv = ConversationHandler(
-    entry_points=[CommandHandler("upload", cmd_upload)],
-    states={
-        STATE_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, password_text)],
-        STATE_THUMBNAIL: [MessageHandler(filters.PHOTO & ~filters.COMMAND, thumbnail_handler), CommandHandler("cancel", cancel_command)],
-        STATE_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, description_handler), CommandHandler("cancel", cancel_command)],
-        STATE_OPTION: [CallbackQueryHandler(option_pressed)],
-        STATE_MEDIA_UPLOAD: [
-            MessageHandler((filters.PHOTO | filters.VIDEO | filters.Document.ALL) & ~filters.COMMAND, media_receiver),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, url_text_receive),
-            CommandHandler("done", done_receiving_media),
-            CommandHandler("cancel", cancel_command),
-        ],
-        STATE_CONFIRM_TOKEN: [CallbackQueryHandler(token_choice_callback)],
-    },
-    fallbacks=[CommandHandler("cancel", cancel_command)],
-    allow_reentry=True,
-)
 
-application.add_handler(CommandHandler("start", start))
-application.add_handler(conv)
-application.add_handler(CallbackQueryHandler(option_pressed, pattern="^opt_"))
-application.add_handler(CallbackQueryHandler(token_choice_callback, pattern="^tok_"))
-application.add_handler(CallbackQueryHandler(callback_get_token_exeio, pattern="^gettok_"))
-application.add_handler(CommandHandler("addvip", cmd_addvip))
-application.add_handler(CommandHandler("delvip", cmd_delvip))
-application.add_handler(CommandHandler("changepass", cmd_changepass))
-application.add_handler(CommandHandler("myinfo", cmd_myinfo))
-
-# --- Webhook endpoint ---
-@flask_app.post(f"/webhook/{UPLOAD_BOT_TOKEN}")
-async def webhook() -> str:
+# --- Webhook route ---
+@flask_app.route(f"/webhook/{UPLOAD_BOT_TOKEN}", methods=["POST"])
+async def webhook():
     """Handle incoming Telegram updates via webhook"""
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    await application.process_update(update)
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+    except Exception as e:
+        logging.exception(f"Error processing update: {e}")
     return "OK", 200
 
 
+# --- Webhook setup ---
 async def setup_webhook():
-    """Set the webhook URL for Telegram"""
+    """Set or update the Telegram webhook URL"""
     bot = application.bot
     webhook_url = f"{RENDER_EXTERNAL_URL}/webhook/{UPLOAD_BOT_TOKEN}"
-    current = await bot.get_webhook_info()
-    if current.url != webhook_url:
-        await bot.set_webhook(webhook_url)
-        logging.info(f"✅ Webhook set: {webhook_url}")
-    else:
-        logging.info("Webhook already set correctly.")
+
+    # Always delete first to avoid "Conflict" errors
+    await bot.delete_webhook(drop_pending_updates=True)
+
+    await bot.set_webhook(url=webhook_url)
+    logging.info(f"✅ Webhook set: {webhook_url}")
 
 
+# --- Main entrypoint ---
 def main():
-    """Main entrypoint (used by Render)"""
+    """Main entrypoint for Render"""
     logging.basicConfig(level=logging.INFO)
+    # Initialize database, etc.
     init_db()
     load_password_from_db()
 
-    # Run webhook setup before Flask server starts
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(setup_webhook())
+    # Add your handlers to the application here
+    # example:
+    application.add_handler(CommandHandler("start", start))
+    # application.add_handler(conv_handler)
 
-    # Run Flask app (Render listens on PORT env var)
+    # Setup webhook (run async setup once before Flask starts)
+    asyncio.run(setup_webhook())
+
+    # Start Flask web server
     port = int(os.environ.get("PORT", 8080))
+    logging.info(f"🚀 Starting Flask server on port {port}")
     flask_app.run(host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
     main()
-
-
- 
