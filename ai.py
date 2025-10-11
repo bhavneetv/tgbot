@@ -2,7 +2,7 @@
 """
 Stable Telegram Upload+View Bot — webhook variant for Render (single-file)
 - No polling. Uses webhooks.
-- Runs Telegram Application and Flask (ASGI) in the same asyncio loop via Hypercorn.
+- Runs Telegram Application and Quart (ASGI) in the same asyncio loop via Hypercorn.
 - Fixed for Python 3.13 compatibility
 """
 
@@ -15,7 +15,7 @@ import urllib.parse
 import asyncio
 from typing import Dict, Any, Optional
 
-from quart import Quart, request, jsonify
+from quart import Quart, request
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -39,7 +39,7 @@ from hypercorn.asyncio import serve
 # ------------------------------
 # CONFIG
 # ------------------------------
-UPLOAD_BOT_TOKEN = os.environ.get("UPLOAD_BOT_TOKEN", "7986735755:AAHQ5Ke7TI9uBxcYivDpib5pNzOmebGdZSY").strip()
+UPLOAD_BOT_TOKEN = os.environ.get("UPLOAD_BOT_TOKEN", "").strip()
 if not UPLOAD_BOT_TOKEN:
     raise RuntimeError("UPLOAD_BOT_TOKEN must be provided in environment")
 
