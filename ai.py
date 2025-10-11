@@ -45,7 +45,11 @@ from telegram.ext import (
 import aiohttp
 
 import asyncio
+import threading
+
+# Prevent “Event loop is closed” on Python 3.11+
 asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+
 
 # ------------------------------
 # Config (env)
@@ -891,16 +895,24 @@ def main():
         await set_webhook_if_needed()
         logger.info("Telegram Application initialized and running (webhook mode).")
 
-    # ✅ Start the Telegram bot in a separate background thread
-    def run_bot():
-        asyncio.run(start_async())
+        # 💤 Keep bot alive forever — prevents loop from finishing and closing
+        while True:
+            await asyncio.sleep(3600)
 
+    def run_bot():
+        try:
+            asyncio.run(start_async())
+        except RuntimeError as e:
+            logger.error(f"Bot loop crashed: {e}")
+
+    # ✅ Run bot in separate thread so Flask doesn’t interfere
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
 
-    # ✅ Start Flask server (keeps the process alive)
+    # ✅ Run Flask web server
     logger.info("Starting Flask webserver on port %d", PORT)
-    flask_app.run(host="0.0.0.0", port=PORT)
+    flask_app.run(host="0.0.0.0", port=PORT, use_reloader=False)
+
 
 
 import asyncio
