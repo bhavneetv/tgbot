@@ -891,6 +891,8 @@ def main():
 
     async def start_async():
         await application.initialize()
+        application.add_error_handler(lambda update, context: None)
+
         await application.start()
         await set_webhook_if_needed()
         logger.info("Telegram Application initialized and running (webhook mode).")
