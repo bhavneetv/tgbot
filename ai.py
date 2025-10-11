@@ -36,9 +36,7 @@ import aiohttp
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
 
-from flask import Config
-if "PROVIDE_AUTOMATIC_OPTIONS" not in Config.default_config:
-    Config.default_config["PROVIDE_AUTOMATIC_OPTIONS"] = True
+
 
 
 # ------------------------------
@@ -809,13 +807,31 @@ async def ptb_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ------------------------------
 # Quart app (replaces Flask for full async support)
 # ------------------------------
+# --- Fix Quart Flask compatibility on Python 3.13 ---
+from flask import Config
+
+try:
+    # Some versions use Config.default_config
+    default_cfg = getattr(Config, "default_config", None)
+    if default_cfg is not None:
+        default_cfg.setdefault("PROVIDE_AUTOMATIC_OPTIONS", True)
+    else:
+        # For newer Flask/Quart where default_config is missing
+        # create a dummy subclass that ensures the key exists
+        old_init = Config.__init__
+
+        def new_init(self, *args, **kwargs):
+            old_init(self, *args, **kwargs)
+            self.setdefault("PROVIDE_AUTOMATIC_OPTIONS", True)
+
+        Config.__init__ = new_init
+except Exception:
+    pass
+
+# ✅ Now safely create the Quart app
 app = Quart(__name__)
-
-# # --- Python 3.13 Quart workaround ---
-# if "PROVIDE_AUTOMATIC_OPTIONS" not in app.config:
-#     app.config["PROVIDE_AUTOMATIC_OPTIONS"] = True
-
 telegram_app: Optional[Application] = None
+
 
 
 @app.route("/", methods=["GET"])
