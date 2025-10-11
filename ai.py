@@ -895,23 +895,27 @@ def main():
         await set_webhook_if_needed()
         logger.info("Telegram Application initialized and running (webhook mode).")
 
-        # 💤 Keep bot alive forever — prevents loop from finishing and closing
+        # Keep bot alive
         while True:
             await asyncio.sleep(3600)
 
     def run_bot():
+        # Create a brand-new loop *only* for the bot thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            asyncio.run(start_async())
-        except RuntimeError as e:
-            logger.error(f"Bot loop crashed: {e}")
+            loop.run_until_complete(start_async())
+        finally:
+            loop.close()
 
-    # ✅ Run bot in separate thread so Flask doesn’t interfere
+    # Start the Telegram bot in its own completely separate thread
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
 
-    # ✅ Run Flask web server
+    # Start Flask without reloader so it doesn’t respawn threads
     logger.info("Starting Flask webserver on port %d", PORT)
     flask_app.run(host="0.0.0.0", port=PORT, use_reloader=False)
+
 
 
 
