@@ -1,27 +1,19 @@
 #!/usr/bin/env python3
 """
-Telegram Upload+View Bot — webhook variant (single-file)
-
-Drop into Render as a web service. Uses webhooks (no polling) to avoid `telegram.error.Conflict`.
-Keeps upload/view/token logic from your previous code, adapted for webhook handlers.
-
-Usage:
- - Set environment variables (see top of file / README).
- - Deploy to Render as a web service.
- - Configure Uptime Robot to ping https://<your-render-hostname>/ every 5 minutes.
-
-Notes:
- - If you have multiple instances/replicas, ensure only one sets the webhook (control with SET_WEBHOOK=1).
- - This file intentionally avoids polling entirely.
+Stable Telegram Upload+View Bot — webhook variant for Render (single-file)
+- No polling. Uses webhooks.
+- Runs Telegram Application and Flask (ASGI) in the same asyncio loop via Hypercorn.
+- Keeps your upload/view/token logic with minimal changes.
 """
+
 import os
-import logging
 import time
+import logging
 import secrets
 import sqlite3
 import urllib.parse
 import asyncio
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional, List
 
 from flask import Flask, request, jsonify
 from telegram import (
@@ -41,18 +33,10 @@ from telegram.ext import (
     ConversationHandler,
     filters,
 )
-
 import aiohttp
 
-import asyncio
-import threading
-
-# Prevent “Event loop is closed” on Python 3.11+
-asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
-
-
 # ------------------------------
-# Config (env)
+# CONFIG
 # ------------------------------
 UPLOAD_BOT_TOKEN = os.environ.get("UPLOAD_BOT_TOKEN", "7986735755:AAHQ5Ke7TI9uBxcYivDpib5pNzOmebGdZSY").strip()
 if not UPLOAD_BOT_TOKEN:
@@ -60,23 +44,30 @@ if not UPLOAD_BOT_TOKEN:
 
 MAIN_CHANNEL_ID = os.environ.get("MAIN_CHANNEL_ID", "-1003104322226").strip()
 if not MAIN_CHANNEL_ID:
-    raise RuntimeError("MAIN_CHANNEL_ID must be provided in environment")
+    # keep default if not provided (you can set env instead)
+    MAIN_CHANNEL_ID = "-1003104322226"
 
 PASSWORD = os.environ.get("UPLOAD_PASSWORD", "test")
 PASSWORD_VALID_SECONDS = int(os.environ.get("PASSWORD_VALID_SECONDS", 24 * 3600))
 DB_PATH = os.environ.get("DB_PATH", "tg_content.db")
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
+
 EXEIO_API_KEY = os.environ.get("EXEIO_API_KEY", "").strip()
 EXEIO_API_ENDPOINT = os.environ.get("EXEIO_API_ENDPOINT", "https://exe.io/api")
-# If you prefer to provide full webhook URL directly, set WEBHOOK_URL
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").strip()
+
 RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "").strip()
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").strip()
 PORT = int(os.environ.get("PORT", 8080))
 SET_WEBHOOK = os.environ.get("SET_WEBHOOK", "1").strip() == "1"
+
+# webhook path uses bot id as secret-ish path piece
+TELEGRAM_WEBHOOK_PATH = f"/webhook/{UPLOAD_BOT_TOKEN.split(':')[0]}"
+
+# content protection toggle
 content_protection = os.environ.get("CONTENT_PROTECTION", "1").strip() != "0"
 
 # ------------------------------
-# Conversation states
+# STATES
 # ------------------------------
 (
     STATE_PASSWORD,
@@ -92,16 +83,16 @@ content_protection = os.environ.get("CONTENT_PROTECTION", "1").strip() != "0"
 sessions: Dict[int, Dict[str, Any]] = {}
 
 # ------------------------------
-# Logging
+# LOGGING
 # ------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ------------------------------
-# DB helpers (same schema as your original)
+# DB helpers
 # ------------------------------
 def init_db() -> None:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS users(
         user_id INTEGER PRIMARY KEY,
@@ -150,7 +141,7 @@ def init_db() -> None:
 def load_password_from_db():
     global PASSWORD
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         c = conn.cursor()
         c.execute("SELECT value FROM settings WHERE key = 'password'")
         row = c.fetchone()
@@ -162,7 +153,7 @@ def load_password_from_db():
     except Exception:
         logger.exception("Failed to read password from DB; using env/default.")
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         c = conn.cursor()
         c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("password", PASSWORD))
         conn.commit()
@@ -172,7 +163,7 @@ def load_password_from_db():
 
 def set_password_in_db(new_pass: str):
     global PASSWORD
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("password", new_pass))
     conn.commit()
@@ -180,7 +171,7 @@ def set_password_in_db(new_pass: str):
     PASSWORD = new_pass
 
 def user_is_authed(user_id: int) -> bool:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     c.execute("SELECT last_auth, is_vip FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
@@ -193,7 +184,7 @@ def user_is_authed(user_id: int) -> bool:
     return (time.time() - last_auth) <= PASSWORD_VALID_SECONDS
 
 def set_user_auth(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     now = int(time.time())
     c.execute("SELECT is_vip FROM users WHERE user_id = ?", (user_id,))
@@ -204,7 +195,7 @@ def set_user_auth(user_id: int):
     conn.close()
 
 def set_user_vip(user_id: int, is_vip: int = 1):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     c.execute("SELECT last_auth FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
@@ -214,7 +205,7 @@ def set_user_vip(user_id: int, is_vip: int = 1):
     conn.close()
 
 def save_content_to_db(uploader_id: int, thumb_file_id: str, description: str, is_text_only: int, requires_token: int) -> int:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     now = int(time.time())
     c.execute("""INSERT INTO content(uploader_id, thumb_file_id, description, is_text_only, requires_token, created_at)
@@ -225,7 +216,7 @@ def save_content_to_db(uploader_id: int, thumb_file_id: str, description: str, i
     return content_id
 
 def add_media_item(content_id: int, file_id: str, file_unique_id: str, media_type: str, is_forwarded: int = 0):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     c.execute("""INSERT INTO media_items(content_id, file_id, file_unique_id, media_type, is_forwarded)
                  VALUES(?,?,?,?,?)""", (content_id, file_id, file_unique_id, media_type, is_forwarded))
@@ -233,7 +224,7 @@ def add_media_item(content_id: int, file_id: str, file_unique_id: str, media_typ
     conn.close()
 
 def get_content(content_id: int) -> Optional[Dict[str, Any]]:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     c.execute("SELECT content_id, uploader_id, thumb_file_id, description, is_text_only, requires_token, created_at, main_channel_message_id FROM content WHERE content_id = ?", (content_id,))
     row = c.fetchone()
@@ -254,18 +245,16 @@ def create_token_for_user(user_id: int, content_id: int) -> str:
     token = secrets.token_hex(4)
     now = int(time.time())
     expires = now + 24 * 3600
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
-    c.execute("""
-        INSERT OR REPLACE INTO tokens(token,user_id,content_id,issued_at,expires_at)
-        VALUES(?,?,?,?,?)
-    """, (token, user_id, content_id, now, expires))
+    c.execute("""INSERT OR REPLACE INTO tokens(token,user_id,content_id,issued_at,expires_at)
+                 VALUES(?,?,?,?,?)""", (token, user_id, content_id, now, expires))
     conn.commit()
     conn.close()
     return token
 
 def get_valid_token(token: str) -> Optional[Dict[str, Any]]:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     c.execute("SELECT token,user_id,content_id,issued_at,expires_at FROM tokens WHERE token = ?", (token,))
     row = c.fetchone()
@@ -280,22 +269,21 @@ def get_valid_token(token: str) -> Optional[Dict[str, Any]]:
     return data
 
 def mark_token_used(token: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
-    # Mark as used (set is_used=1)
     c.execute("UPDATE tokens SET is_used = 1 WHERE token = ?", (token,))
     conn.commit()
     conn.close()
 
 def record_shortener_request(short_url: str, token: str, status: str = "done"):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     c.execute("INSERT INTO shortener_requests(shortener_url, token, status) VALUES(?,?,?)", (short_url, token, status))
     conn.commit()
     conn.close()
 
 # ------------------------------
-# UI helpers (same as before)
+# UI helpers
 # ------------------------------
 def count_media_for_session(session: Dict[str, Any]) -> Dict[str, int]:
     photos = sum(1 for m in session.get("media_list", []) if m["media_type"] == "photo")
@@ -337,14 +325,11 @@ async def exeio_shorten_long_url(long_url: str) -> Optional[str]:
         api = f"{EXEIO_API_ENDPOINT}?api={EXEIO_API_KEY}&url={encoded}"
         async with aiohttp.ClientSession() as session:
             async with session.get(api, timeout=10) as resp:
-                # many shortener APIs return json; adapt as needed
                 try:
                     data = await resp.json()
-                    # attempt common fields
                     for key in ("shortenedUrl","short","url"):
                         if data.get(key):
                             return data.get(key)
-                    # fallback: if API returns string
                     if isinstance(data, str) and data.startswith("http"):
                         return data
                 except Exception:
@@ -357,7 +342,7 @@ async def exeio_shorten_long_url(long_url: str) -> Optional[str]:
         return None
 
 # ------------------------------
-# Handlers (mostly preserved, adapted for webhook style)
+# Handlers (kept your logic; minor fixes)
 # ------------------------------
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -387,7 +372,7 @@ async def handle_view_content(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.effective_chat.send_message("Content not found.")
         return
     requires_token = bool(content.get("requires_token"))
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     c.execute("SELECT is_vip FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
@@ -397,7 +382,7 @@ async def handle_view_content(update: Update, context: ContextTypes.DEFAULT_TYPE
         await send_content_media(update, context, content)
         return
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     now = int(time.time())
     c.execute(
@@ -463,6 +448,7 @@ async def send_content_media(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 else:
                     await chat.send_video(video=medias[0].media, caption=medias[0].caption, protect_content=content_protection)
             else:
+                # media group supports up to 10
                 await chat.send_media_group(media=medias[:10], protect_content=content_protection)
         else:
             thumb = content.get("thumb_file_id")
@@ -475,12 +461,15 @@ async def send_content_media(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 await chat.send_document(document=m["file_id"], protect_content=content_protection)
     except Exception as e:
         logger.exception("Failed to send media: %s", e)
-        await chat.send_message("Failed to send media. The file ids may be invalid or the bot lacks access.")
+        try:
+            await chat.send_message("Failed to send media. The file ids may be invalid or the bot lacks access.")
+        except Exception:
+            logger.exception("Also failed to notify user about media send failure.")
 
 # --- Upload flow handlers (mostly unchanged) ---
 async def cmd_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     c.execute("SELECT is_vip FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
@@ -640,7 +629,7 @@ async def token_choice_callback(update: Update, context: ContextTypes.DEFAULT_TY
         url_text = session.get("url_text", "")
         if url_text:
             description_to_save = f"{description}\n\n[URL/TEXT]\n{url_text}"
-            conn = sqlite3.connect(DB_PATH)
+            conn = sqlite3.connect(DB_PATH, timeout=30)
             c = conn.cursor()
             c.execute("UPDATE content SET description = ? WHERE content_id = ?", (description_to_save, content_id))
             conn.commit()
@@ -653,7 +642,7 @@ async def token_choice_callback(update: Update, context: ContextTypes.DEFAULT_TY
     caption = f"{session.get('description','')}\n\n{summary}\n\n{'🔒 Token: Required' if requires_token else '🟢 Free'}"
     try:
         sent = await context.bot.send_photo(chat_id=MAIN_CHANNEL_ID, photo=thumbnail, caption=caption, reply_markup=kb)
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=30)
         c = conn.cursor()
         c.execute("UPDATE content SET main_channel_message_id = ? WHERE content_id = ?", (sent.message_id, content_id))
         conn.commit()
@@ -758,7 +747,7 @@ async def cmd_changepass(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_myinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     c = conn.cursor()
     c.execute("SELECT last_auth,is_vip FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
@@ -779,19 +768,9 @@ async def cmd_myinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ------------------------------
 # Application & Webhook wiring
 # ------------------------------
-# Flask for health checks + webhook entry
-flask_app = Flask(__name__)
+# We'll create the Application in create_application() and run it inside same asyncio loop as Hypercorn
 
-@flask_app.route("/", methods=["GET"])
-def home():
-    return "✅ Bot is alive (webhook)."
-
-# We'll start the telegram Application and attach its webhook route via Flask's WSGI integration below.
-
-# Build the Application with standard handlers setup
-def build_application() -> Application:
-    app = ApplicationBuilder().token(UPLOAD_BOT_TOKEN).build()
-
+def build_conversation_handler():
     conv = ConversationHandler(
         entry_points=[CommandHandler("upload", cmd_upload)],
         states={
@@ -810,7 +789,11 @@ def build_application() -> Application:
         fallbacks=[CommandHandler("cancel", cancel_command)],
         allow_reentry=True,
     )
+    return conv
 
+# We'll add handlers in setup_application()
+def setup_application(app: Application):
+    conv = build_conversation_handler()
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(option_pressed, pattern="^opt_"))
@@ -821,49 +804,70 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("changepass", cmd_changepass))
     app.add_handler(CommandHandler("myinfo", cmd_myinfo))
 
-    return app
-
-# We'll mount the telegram Application's webhook endpoint inside Flask.
-# Use /webhook/<token> path (keeps it secretish). Flask receives POST JSON, converts to Update and passes to app.process_update.
-
-TELEGRAM_WEBHOOK_PATH = f"/webhook/{UPLOAD_BOT_TOKEN.split(':')[0]}"
-
-# Create global app
-application = build_application()
-
-@flask_app.route(TELEGRAM_WEBHOOK_PATH, methods=["POST"])
-def telegram_webhook_entry():
-    if request.headers.get("content-type", "").startswith("application/json"):
-        data = request.get_json(force=True)
-    else:
-        data = request.get_data(as_text=True)
-        try:
-            import json
-            data = json.loads(data)
-        except Exception:
-            logger.warning("Webhook received non-json body")
-            return "bad request", 400
-    # create Update and schedule processing on asyncio loop
+# Proper async error handler to avoid "NoneType can't be awaited"
+async def ptb_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.exception("Exception in handler", exc_info=context.error)
+    # optional: notify user
     try:
-        update = Update.de_json(data, application.bot)
+        if update and getattr(update, "effective_chat", None):
+            await update.effective_chat.send_message("⚠️ An internal error occurred. Please try again.")
     except Exception:
-        logger.exception("Failed to parse update")
-        return "bad request", 400
-    # Use asyncio.create_task to process the update asynchronously, but ensure event loop is running
+        logger.exception("Failed to notify user about error")
+
+# ------------------------------
+# Flask app (async routes supported by Hypercorn)
+# ------------------------------
+flask_app = Flask(__name__)
+
+# We'll set telegram_app later (global)
+telegram_app: Optional[Application] = None
+
+@flask_app.route("/", methods=["GET"])
+def home():
+    return "✅ Bot is alive (webhook)."
+
+# Async route to receive webhook (Hypercorn will support it)
+@flask_app.route(TELEGRAM_WEBHOOK_PATH, methods=["POST"])
+async def telegram_webhook_entry():
+    global telegram_app
+    if telegram_app is None:
+        logger.warning("Telegram app not initialized yet")
+        return "service unavailable", 503
     try:
-        # If running under same event loop, use create_task
-        loop = asyncio.get_event_loop()
-        # schedule processing
-        loop.create_task(application.process_update(update))
-    except RuntimeError:
-        # no running loop — run synchronously (fallback)
-        asyncio.run(application.process_update(update))
+        data = await request.get_json(force=True)
+    except Exception:
+        logger.exception("Failed to parse json body")
+        return "bad request", 400
+    try:
+        update = Update.de_json(data, telegram_app.bot)
+    except Exception:
+        logger.exception("Failed to build Update")
+        return "bad request", 400
+    # Process the update on the running application (same event loop)
+    try:
+        await telegram_app.process_update(update)
+    except Exception:
+        # log only (error handler will also run)
+        logger.exception("Error while processing update")
     return "ok", 200
 
 # ------------------------------
-# Startup helpers: set webhook on startup (if requested)
+# Startup helpers (async)
 # ------------------------------
-async def set_webhook_if_needed():
+async def create_and_start_application() -> Application:
+    global telegram_app
+    app = ApplicationBuilder().token(UPLOAD_BOT_TOKEN).build()
+    # Add handlers and error handler
+    app.add_error_handler(ptb_error_handler)
+    setup_application(app)
+    # initialize & start application (this binds internals)
+    await app.initialize()
+    await app.start()
+    logger.info("Telegram Application initialized and started")
+    telegram_app = app
+    return app
+
+async def set_webhook_if_needed(app: Application):
     if not SET_WEBHOOK:
         logger.info("SET_WEBHOOK not enabled: skipping webhook set")
         return
@@ -871,61 +875,58 @@ async def set_webhook_if_needed():
         webhook = WEBHOOK_URL
     else:
         if not RENDER_EXTERNAL_HOSTNAME:
-            raise RuntimeError("RENDER_EXTERNAL_HOSTNAME not set and WEBHOOK_URL not provided")
+            logger.warning("RENDER_EXTERNAL_HOSTNAME not set and WEBHOOK_URL not provided; skipping webhook set")
+            return
         webhook = f"https://{RENDER_EXTERNAL_HOSTNAME}{TELEGRAM_WEBHOOK_PATH}"
-    # ensure webhook is HTTPS and looks sane
-    logger.info("Setting webhook to %s", webhook)
     try:
-        await application.bot.set_webhook(url=webhook)
-        logger.info("Webhook set successfully")
+        await app.bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        logger.exception("Failed to delete previous webhook (continuing)")
+    try:
+        await app.bot.set_webhook(url=webhook)
+        logger.info("Webhook set successfully to %s", webhook)
     except Exception:
         logger.exception("Failed to set webhook")
 
 # ------------------------------
-# Main entry — init DB, load password, start flask + telegram event loop
+# Run: start telegram app + hypercorn server in same loop
 # ------------------------------
-import threading
-def main():
+async def _run():
+    # init DB & password
     init_db()
     load_password_from_db()
 
-    async def start_async():
-        await application.initialize()
-        application.add_error_handler(lambda update, context: None)
+    # Create and start telegram Application
+    app = await create_and_start_application()
 
-        await application.start()
-        await set_webhook_if_needed()
-        logger.info("Telegram Application initialized and running (webhook mode).")
+    # set webhook
+    await set_webhook_if_needed(app)
 
-        # Keep bot alive
-        while True:
-            await asyncio.sleep(3600)
+    # serve Flask via Hypercorn (runs until cancelled)
+    from hypercorn.asyncio import serve
+    from hypercorn.config import Config
 
-    def run_bot():
-        # Create a brand-new loop *only* for the bot thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    config = Config()
+    config.bind = [f"0.0.0.0:{PORT}"]
+    # Optional tuning
+    config.workers = 1
+    config.use_reloader = False
+
+    logger.info("Starting ASGI server (Hypercorn) on port %d", PORT)
+    # serve runs forever; when it exits, we stop the bot
+    try:
+        await serve(flask_app, config)
+    finally:
+        logger.info("Hypercorn stopped — shutting down Telegram app")
         try:
-            loop.run_until_complete(start_async())
-        finally:
-            loop.close()
+            await app.shutdown()
+            await app.stop()
+        except Exception:
+            logger.exception("Error when shutting down Telegram app")
 
-    # Start the Telegram bot in its own completely separate thread
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-
-    # Start Flask without reloader so it doesn’t respawn threads
-    logger.info("Starting Flask webserver on port %d", PORT)
-    flask_app.run(host="0.0.0.0", port=PORT, use_reloader=False)
-
-
-
-
-import asyncio
-
-# def run_bot():
-#     asyncio.run(init_bot())  # keep your existing init_bot() here
+def main():
+    # Start the combined event loop (Hypercorn + Telegram run here)
+    asyncio.run(_run())
 
 if __name__ == "__main__":
     main()
-
