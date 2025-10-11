@@ -3,7 +3,7 @@
 Stable Telegram Upload+View Bot — webhook variant for Render (single-file)
 - No polling. Uses webhooks.
 - Runs Telegram Application and Flask (ASGI) in the same asyncio loop via Hypercorn.
-- Keeps your upload/view/token logic with minimal changes.
+- Fixed for Python 3.13 compatibility
 """
 
 import os
@@ -13,9 +13,9 @@ import secrets
 import sqlite3
 import urllib.parse
 import asyncio
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
-from flask import Flask, request, jsonify
+from quart import Quart, request, jsonify
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -25,7 +25,6 @@ from telegram import (
 )
 from telegram.ext import (
     Application,
-    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     ContextTypes,
@@ -34,6 +33,8 @@ from telegram.ext import (
     filters,
 )
 import aiohttp
+from hypercorn.config import Config
+from hypercorn.asyncio import serve
 
 # ------------------------------
 # CONFIG
@@ -43,10 +44,6 @@ if not UPLOAD_BOT_TOKEN:
     raise RuntimeError("UPLOAD_BOT_TOKEN must be provided in environment")
 
 MAIN_CHANNEL_ID = os.environ.get("MAIN_CHANNEL_ID", "-1003104322226").strip()
-if not MAIN_CHANNEL_ID:
-    # keep default if not provided (you can set env instead)
-    MAIN_CHANNEL_ID = "-1003104322226"
-
 PASSWORD = os.environ.get("UPLOAD_PASSWORD", "test")
 PASSWORD_VALID_SECONDS = int(os.environ.get("PASSWORD_VALID_SECONDS", 24 * 3600))
 DB_PATH = os.environ.get("DB_PATH", "tg_content.db")
@@ -324,7 +321,7 @@ async def exeio_shorten_long_url(long_url: str) -> Optional[str]:
         encoded = urllib.parse.quote(long_url, safe='')
         api = f"{EXEIO_API_ENDPOINT}?api={EXEIO_API_KEY}&url={encoded}"
         async with aiohttp.ClientSession() as session:
-            async with session.get(api, timeout=10) as resp:
+            async with session.get(api, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 try:
                     data = await resp.json()
                     for key in ("shortenedUrl","short","url"):
@@ -342,7 +339,7 @@ async def exeio_shorten_long_url(long_url: str) -> Optional[str]:
         return None
 
 # ------------------------------
-# Handlers (kept your logic; minor fixes)
+# Handlers
 # ------------------------------
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -438,8 +435,6 @@ async def send_content_media(update: Update, context: ContextTypes.DEFAULT_TYPE,
             medias.append(InputMediaPhoto(media=m["file_id"], caption=caption_text))
         elif m["media_type"] == "video":
             medias.append(InputMediaVideo(media=m["file_id"], caption=caption_text))
-        else:
-            pass
     try:
         if medias:
             if len(medias) == 1:
@@ -448,7 +443,6 @@ async def send_content_media(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 else:
                     await chat.send_video(video=medias[0].media, caption=medias[0].caption, protect_content=content_protection)
             else:
-                # media group supports up to 10
                 await chat.send_media_group(media=medias[:10], protect_content=content_protection)
         else:
             thumb = content.get("thumb_file_id")
@@ -466,7 +460,6 @@ async def send_content_media(update: Update, context: ContextTypes.DEFAULT_TYPE,
         except Exception:
             logger.exception("Also failed to notify user about media send failure.")
 
-# --- Upload flow handlers (mostly unchanged) ---
 async def cmd_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -604,7 +597,6 @@ async def done_receiving_media(update: Update, context: ContextTypes.DEFAULT_TYP
     return await ask_token_requirement(update, context)
 
 async def ask_token_requirement(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     await update.message.reply_text("Does this content require a watch token?", reply_markup=kb_token_choice_with_emoji())
     return STATE_CONFIRM_TOKEN
 
@@ -693,7 +685,7 @@ async def callback_get_token_exeio(update: Update, context: ContextTypes.DEFAULT
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶ Watch Now", url=long_watch_link)]]),
         )
 
-# Admin
+# Admin commands
 async def cmd_addvip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id not in ADMIN_IDS:
@@ -766,10 +758,8 @@ async def cmd_myinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⏳ Password valid for another {hrs}h {mins}m {secs}s.")
 
 # ------------------------------
-# Application & Webhook wiring
+# Application setup
 # ------------------------------
-# We'll create the Application in create_application() and run it inside same asyncio loop as Hypercorn
-
 def build_conversation_handler():
     conv = ConversationHandler(
         entry_points=[CommandHandler("upload", cmd_upload)],
@@ -791,7 +781,6 @@ def build_conversation_handler():
     )
     return conv
 
-# We'll add handlers in setup_application()
 def setup_application(app: Application):
     conv = build_conversation_handler()
     app.add_handler(CommandHandler("start", start_handler))
@@ -804,10 +793,8 @@ def setup_application(app: Application):
     app.add_handler(CommandHandler("changepass", cmd_changepass))
     app.add_handler(CommandHandler("myinfo", cmd_myinfo))
 
-# Proper async error handler to avoid "NoneType can't be awaited"
 async def ptb_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Exception in handler", exc_info=context.error)
-    # optional: notify user
     try:
         if update and getattr(update, "effective_chat", None):
             await update.effective_chat.send_message("⚠️ An internal error occurred. Please try again.")
@@ -815,19 +802,17 @@ async def ptb_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Failed to notify user about error")
 
 # ------------------------------
-# Flask app (async routes supported by Hypercorn)
+# Quart app (replaces Flask for full async support)
 # ------------------------------
-flask_app = Flask(__name__)
+app = Quart(__name__)
 
-# We'll set telegram_app later (global)
 telegram_app: Optional[Application] = None
 
-@flask_app.route("/", methods=["GET"])
-def home():
+@app.route("/", methods=["GET"])
+async def home():
     return "✅ Bot is alive (webhook)."
 
-# Async route to receive webhook (Hypercorn will support it)
-@flask_app.route(TELEGRAM_WEBHOOK_PATH, methods=["POST"])
+@app.route(TELEGRAM_WEBHOOK_PATH, methods=["POST"])
 async def telegram_webhook_entry():
     global telegram_app
     if telegram_app is None:
@@ -843,31 +828,36 @@ async def telegram_webhook_entry():
     except Exception:
         logger.exception("Failed to build Update")
         return "bad request", 400
-    # Process the update on the running application (same event loop)
     try:
         await telegram_app.process_update(update)
     except Exception:
-        # log only (error handler will also run)
         logger.exception("Error while processing update")
     return "ok", 200
 
 # ------------------------------
-# Startup helpers (async)
+# Startup and main loop
 # ------------------------------
 async def create_and_start_application() -> Application:
     global telegram_app
-    app = ApplicationBuilder().token(UPLOAD_BOT_TOKEN).build()
-    app.add_error_handler(ptb_error_handler)
-    setup_application(app)
+    
+    # Use Application.builder() without updater - this avoids the Updater issue
+    application = (
+        Application.builder()
+        .token(UPLOAD_BOT_TOKEN)
+        .updater(None)  # CRITICAL: Disable updater to avoid Python 3.13 issue
+        .build()
+    )
+    
+    application.add_error_handler(ptb_error_handler)
+    setup_application(application)
 
-    await app.initialize()
-    await app.start()
+    await application.initialize()
+    await application.start()
     logger.info("Telegram Application initialized and started")
-    telegram_app = app
-    return app
+    telegram_app = application
+    return application
 
-
-async def set_webhook_if_needed(app: Application):
+async def set_webhook_if_needed(application: Application):
     if not SET_WEBHOOK:
         logger.info("SET_WEBHOOK not enabled: skipping webhook set")
         return
@@ -879,30 +869,27 @@ async def set_webhook_if_needed(app: Application):
             return
         webhook = f"https://{RENDER_EXTERNAL_HOSTNAME}{TELEGRAM_WEBHOOK_PATH}"
     try:
-        await app.bot.delete_webhook(drop_pending_updates=True)
+        await application.bot.delete_webhook(drop_pending_updates=True)
     except Exception:
         logger.exception("Failed to delete previous webhook (continuing)")
     try:
-        await app.bot.set_webhook(url=webhook)
+        await application.bot.set_webhook(url=webhook)
         logger.info("Webhook set successfully to %s", webhook)
     except Exception:
         logger.exception("Failed to set webhook")
 
-# ------------------------------
-# Run: start telegram app + hypercorn server in same loop
-# ------------------------------
 async def _run():
-    # init DB & password
+    # Init DB & password
     init_db()
     load_password_from_db()
 
     # Create and start telegram Application
-    app = await create_and_start_application()
+    application = await create_and_start_application()
 
-    # set webhook if needed
-    await set_webhook_if_needed(app)
+    # Set webhook
+    await set_webhook_if_needed(application)
 
-    # serve Flask via Hypercorn
+    # Serve Quart via Hypercorn
     config = Config()
     config.bind = [f"0.0.0.0:{PORT}"]
     config.workers = 1
@@ -910,15 +897,14 @@ async def _run():
 
     logger.info("Starting ASGI server (Hypercorn) on port %d", PORT)
     try:
-        await serve(flask_app, config)
+        await serve(app, config)
     finally:
         logger.info("Hypercorn stopped — shutting down Telegram app")
         try:
-            await app.shutdown()
-            await app.stop()
+            await application.shutdown()
+            await application.stop()
         except Exception:
             logger.exception("Error when shutting down Telegram app")
-
 
 def main():
     asyncio.run(_run())

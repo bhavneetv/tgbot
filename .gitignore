@@ -6,3 +6,4 @@ video.py
 view.py
 tg_bots.db
 db.sqlite3
+ai2.py
