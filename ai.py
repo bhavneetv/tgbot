@@ -36,6 +36,11 @@ import aiohttp
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
 
+from flask import Config
+if "PROVIDE_AUTOMATIC_OPTIONS" not in Config.default_config:
+    Config.default_config["PROVIDE_AUTOMATIC_OPTIONS"] = True
+
+
 # ------------------------------
 # CONFIG
 # ------------------------------
@@ -806,9 +811,9 @@ async def ptb_error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ------------------------------
 app = Quart(__name__)
 
-# --- Python 3.13 Quart workaround ---
-if "PROVIDE_AUTOMATIC_OPTIONS" not in app.config:
-    app.config["PROVIDE_AUTOMATIC_OPTIONS"] = True
+# # --- Python 3.13 Quart workaround ---
+# if "PROVIDE_AUTOMATIC_OPTIONS" not in app.config:
+#     app.config["PROVIDE_AUTOMATIC_OPTIONS"] = True
 
 telegram_app: Optional[Application] = None
 
