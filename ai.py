@@ -857,15 +857,15 @@ async def telegram_webhook_entry():
 async def create_and_start_application() -> Application:
     global telegram_app
     app = ApplicationBuilder().token(UPLOAD_BOT_TOKEN).build()
-    # Add handlers and error handler
     app.add_error_handler(ptb_error_handler)
     setup_application(app)
-    # initialize & start application (this binds internals)
+
     await app.initialize()
     await app.start()
     logger.info("Telegram Application initialized and started")
     telegram_app = app
     return app
+
 
 async def set_webhook_if_needed(app: Application):
     if not SET_WEBHOOK:
@@ -899,21 +899,16 @@ async def _run():
     # Create and start telegram Application
     app = await create_and_start_application()
 
-    # set webhook
+    # set webhook if needed
     await set_webhook_if_needed(app)
 
-    # serve Flask via Hypercorn (runs until cancelled)
-    from hypercorn.asyncio import serve
-    from hypercorn.config import Config
-
+    # serve Flask via Hypercorn
     config = Config()
     config.bind = [f"0.0.0.0:{PORT}"]
-    # Optional tuning
     config.workers = 1
     config.use_reloader = False
 
     logger.info("Starting ASGI server (Hypercorn) on port %d", PORT)
-    # serve runs forever; when it exits, we stop the bot
     try:
         await serve(flask_app, config)
     finally:
@@ -924,8 +919,8 @@ async def _run():
         except Exception:
             logger.exception("Error when shutting down Telegram app")
 
+
 def main():
-    # Start the combined event loop (Hypercorn + Telegram run here)
     asyncio.run(_run())
 
 if __name__ == "__main__":
